@@ -55,12 +55,17 @@ volatile unsigned int tim = 0;
 volatile unsigned char tik = 0;
 volatile unsigned char output_mode;
 
+volatile uint8_t last_ccmph = 0;
 
 //*********************************************************************************************
 //  Audio driver interrupt
 //*********************************************************************************************
 
+#ifdef ARDUINO_ARCH_MEGAAVR
+ISR(TCB2_INT_vect)
+#else
 SIGNAL(TIMER1_COMPA_vect)
+#endif
 {
   //-------------------------------
   // Time division
@@ -82,7 +87,11 @@ SIGNAL(TIMER1_COMPA_vect)
   //  Synthesizer/audio mixer
   //-------------------------------
 
+#ifdef ARDUINO_ARCH_MEGAAVR
+  uint8_t ccmph = 127 + 
+#else
   OCR2A = OCR2B = 127 +
+#endif
     ((
   (((signed char)pgm_read_byte(wavs[0] + ((unsigned char *)&(PCW[0] += FTW[0]))[1]) * AMP[0]) >> 8) +
     (((signed char)pgm_read_byte(wavs[1] + ((unsigned char *)&(PCW[1] += FTW[1]))[1]) * AMP[1]) >> 8) +
@@ -90,12 +99,27 @@ SIGNAL(TIMER1_COMPA_vect)
     (((signed char)pgm_read_byte(wavs[3] + ((unsigned char *)&(PCW[3] += FTW[3]))[1]) * AMP[3]) >> 8)
     ) >> 2);
 
+
+  #ifdef ARDUINO_ARCH_MEGAAVR
+  if (ccmph < last_ccmph && last_ccmph < 240){
+    uint8_t patience = 240;
+    while (TCB0.CNT <= last_ccmph && --patience);
+  }
+  TCB0.CCMPL = 255;
+  TCB0.CCMPH = last_ccmph = ccmph;
+  //TCB0.CCMP = (((uint16_t)(last_ccmph = ccmph)) << 8) | 0xff;
+  #endif
   //************************************************
   //  Modulation engine
   //************************************************
   //  FTW[divider] = PITCH[divider] + (int)   (((PITCH[divider]/64)*(EPCW[divider]/64)) /128)*MOD[divider];
   FTW[divider] = PITCH[divider] + (int)   (((PITCH[divider]>>6)*(EPCW[divider]>>6))/128)*MOD[divider];
 	tim++;
+
+  #ifdef ARDUINO_ARCH_MEGAAVR
+  // Clear interrupt flag
+  TCB2.INTFLAGS = TCB_CAPT_bm;
+  #endif
 }
 
 class synth
@@ -115,6 +139,27 @@ public:
   void begin()
   {
     output_mode=CHA;
+
+    #ifdef ARDUINO_ARCH_MEGAAVR
+
+    // Initialize high-frequency PWM (16Mhz / 256 == 62KHz PWM)
+    TCB0.CTRLA = 0; /* Counter Disabled */
+    TCB0.CTRLB = TCB_CNTMODE_PWM8_gc | TCB_CCMPEN_bm; /* PWM mode | Output Enable */
+    TCB0.CCMP = 0x80ff; /* 50% power, 256 clock per cycle */ 
+    TCB0.CNT = 0; /* reset to 0 */
+    TCB0.CTRLA = TCB_CLKSEL_CLKDIV1_gc | TCB_ENABLE_bm; /* 16MHz clock | Counter Enabled */
+    pinMode(6, OUTPUT); /* Pin Output Enabled */
+	
+  	// Initialize 20KHz sample interrupt vector
+    TCB2.CTRLA = 0; /* Counter Disabled */
+    TCB2.CTRLB = TCB_CNTMODE_INT_gc;  /* Periodic Interrupt */
+    TCB2.CCMP = F_CPU_CORRECTED / FS; /* Clock per sample update */
+    TCB2.CNT = 0; /* reset to 0 */
+    TCB2.INTCTRL = TCB_CAPTEI_bm; /* Enable Capture or Timeout interrupt */
+    TCB2.CTRLA = TCB_CLKSEL_CLKDIV1_gc | TCB_ENABLE_bm; /* 16MHz clock | Counter Enabled */
+
+    #else
+
     TCCR1A = 0x00;                                  //-Start audio interrupt
     TCCR1B = 0x09;
     TCCR1C = 0x00;
@@ -126,12 +171,19 @@ public:
     TCCR2B = 0x01;                                  // |
     OCR2A = 127;                                    //-+
     SET(DDRB, 3);				    //-PWM pin
+
+    #endif
   }
 
   //*********************************************************************
   //  Startup fancy selecting varoius output modes
   //*********************************************************************
 
+  #ifdef ARDUINO_ARCH_MEGAAVR
+
+  // TODO: extra output modes not implemented on MEGAAVR
+
+  #else
   void begin(unsigned char d)
   {
     TCCR1A = 0x00;                                  //-Start audio interrupt
@@ -171,6 +223,7 @@ public:
 
     }
   }
+#endif
 
   //*********************************************************************
   //  Timing/sequencing functions
@@ -337,11 +390,19 @@ public:
 
   void suspend()
   {
+    #ifdef ARDUINO_ARCH_MEGAAVR
+    TCB2.INTCTRL &= ~TCB_CAPTEI_bm; /* Enable Capture or Timeout interrupt */
+    #else
     CLR(TIMSK1, OCIE1A);                            //-Stop audio interrupt
+    #endif
   }
   void resume()
   {
+    #ifdef ARDUINO_ARCH_MEGAAVR
+    TCB2.INTCTRL |= TCB_CAPTEI_bm; /* Enable Capture or Timeout interrupt */
+    #else
     SET(TIMSK1, OCIE1A);                            //-Start audio interrupt
+    #endif
   }
 
 };
